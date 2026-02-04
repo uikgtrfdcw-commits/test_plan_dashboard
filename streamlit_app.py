@@ -4,77 +4,55 @@ from oauth2client.service_account import ServiceAccountCredentials
 import pandas as pd
 import re
 
-# 设置网页标题
 st.set_page_config(page_title="🚀 任务进度实时看板", layout="wide")
 st.title("🚀 任务进度实时看板")
 
 def get_gspread_client():
-    """
-    授权并连接 Google Sheets（带 Base64 容错处理）
-    """
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
         if "gcp_service_account" not in st.secrets:
-            st.error("未检测到 Secrets 配置，请在 Streamlit 后台设置 [gcp_service_account]")
+            st.error("未检测到 Secrets 配置")
             st.stop()
             
-        # 复制字典防止修改原始只读对象
         creds_dict = dict(st.secrets["gcp_service_account"])
-        
-        # --- 🛡️ 核心修复逻辑：彻底清理 Base64 杂质 ---
         pk = str(creds_dict["private_key"])
-        header = "-----BEGIN PRIVATE KEY-----"
-        footer = "-----END PRIVATE KEY-----"
         
-        if header in pk and footer in pk:
-            # 1. 提取 Header 和 Footer 之间的核心编码内容
-            content = pk.split(header)[1].split(footer)[0]
-            # 2. 移除所有空白符（空格、换行、回车）以及字面量的 \n 字符
-            # 这一步会干掉那个导致 65 字符报错的“多余字符”
-            clean_body = re.sub(r'\s+', '', content).replace("\\n", "")
-            # 3. 重新拼装为标准的、无杂质的 PEM 格式
-            creds_dict["private_key"] = f"{header}\n{clean_body}\n{footer}\n"
+        # --- 🛡️ v2.2 暴力修复逻辑：剔除所有非 Base64 字符 ---
+        # 1. 提取核心：只保留 BEGIN 和 END 之间的部分
+        content = pk.replace("-----BEGIN PRIVATE KEY-----", "").replace("-----END PRIVATE KEY-----", "")
+        
+        # 2. 物理剔除：删掉所有换行、空格、反斜杠、字母n
+        # 这一步能彻底解决那个“多出来的 1 个字符”
+        clean_body = re.sub(r'[^A-Za-z0-9+/=]', '', content)
+        
+        # 3. 长度补偿：Base64 必须是 4 的倍数
+        # 如果长度余 1，说明最后一个字符是多余的杂质，直接扔掉
+        if len(clean_body) % 4 == 1:
+            clean_body = clean_body[:-1]
+            
+        # 4. 重新合成标准的 PEM 格式
+        creds_dict["private_key"] = f"-----BEGIN PRIVATE KEY-----\n{clean_body}\n-----END PRIVATE KEY-----\n"
         # ----------------------------------------------
 
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         return gspread.authorize(creds)
-    
     except Exception as e:
-        st.error(f"授权失败，请检查配置: {str(e)}")
+        st.error(f"授权失败: {str(e)}")
         st.stop()
 
 def load_data():
-    """
-    从 Google Sheets 加载数据
-    """
     try:
         client = get_gspread_client()
-        # 确保您的 Google Sheet 名字叫 test-plan-dashboard
+        # 注意：请确保你的 Google Sheet 文件名完全匹配 "test-plan-dashboard"
         sheet = client.open("test-plan-dashboard").get_worksheet(0)
-        data = sheet.get_all_records()
-        return pd.DataFrame(data)
+        return pd.DataFrame(sheet.get_all_records())
     except Exception as e:
-        st.error(f"同步失败，请检查配置: {str(e)}")
+        st.error(f"同步失败: {str(e)}")
         return None
 
-# 执行页面渲染逻辑
 df = load_data()
-
 if df is not None:
-    if df.empty:
-        st.warning("表格内容为空，请在 Google Sheet 中添加数据。")
-    else:
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        if st.button("🔄 手动刷新数据"):
-            st.cache_data.clear()
-            st.rerun()
-
-with st.sidebar:
-    st.markdown("### 📊 指挥中心说明")
-    st.info("已启用 v2.1 自动纠错授权引擎")
-    st.markdown("---")
-    st.write("状态: 云端运行中")
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    if st.button("🔄 刷新数据"):
+        st.cache_data.clear()
+        st.rerun()
