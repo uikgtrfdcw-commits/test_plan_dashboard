@@ -1,87 +1,133 @@
 import streamlit as st
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 import pandas as pd
-import json
-import base64
+import gspread
+from google.oauth2.service_account import Credentials
 
-# 版本号更新
-VERSION = "v2.7 (Enhanced UI)"
-st.set_page_config(page_title="🚀 任务进度实时看板", layout="wide")
+SPREADSHEET_ID = "1jxztmCu0gPYkYna05ZVGnnjGEnaJKKCx5YsF_fraerk"
+SHEET1_TITLE = "Sheet1"
+ARCHIVE_TITLE = "Archive"
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
 
-def get_gspread_client():
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    try:
-        if "gcp_json_b64" not in st.secrets:
-            st.error("未检测到 gcp_json_b64 配置")
-            st.stop()
-        b64_str = st.secrets["gcp_json_b64"]
-        json_bytes = base64.b64decode(b64_str)
-        creds_info = json.loads(json_bytes.decode('utf-8'))
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_info, scope)
-        return gspread.authorize(creds)
-    except Exception as e:
-        st.error(f"授权失败: {str(e)}")
-        st.stop()
+st.set_page_config(page_title="任务清单", layout="wide")
 
-def load_data():
-    try:
-        client = get_gspread_client()
-        SHEET_NAME = "Test plan" 
-        spreadsheet = client.open(SHEET_NAME)
-        worksheet = spreadsheet.get_worksheet(0)
-        return pd.DataFrame(worksheet.get_all_records())
-    except Exception as e:
-        st.error(f"同步失败: {str(e)}")
-        return None
 
-# --- 页面主逻辑 ---
-st.title("🚀 任务进度实时看板")
+def _get_gspread_client() -> gspread.Client:
+    conn_secrets = dict(st.secrets["connections"]["gsheets"])
+    creds = Credentials.from_service_account_info(conn_secrets, scopes=SCOPES)
+    return gspread.authorize(creds)
 
-df = load_data()
 
-if df is not None:
+def render_table_with_rowspan(df: pd.DataFrame, title: str) -> None:
+    st.subheader(title)
     if df.empty:
-        st.info("表格目前是空的，请在 Google Sheet 中填入数据。")
-    else:
-        # 使用 Streamlit 的高级列配置进行美化
-        st.data_editor(
-            df,
-            column_config={
-                "状态": st.column_config.SelectboxColumn(
-                    "任务状态",
-                    help="任务的当前进展情况",
-                    options=["待开始", "进行中", "已完成"],
-                    required=True,
-                ),
-                # 如果你的表格有“进度”列且是 0-1 之间的小数，可以使用进度条
-                "进度": st.column_config.ProgressColumn(
-                    "进度 (%)",
-                    format="%.0f",
-                    min_value=0,
-                    max_value=100,
-                ),
-            },
-            hide_index=True,
-            use_container_width=True,
-            disabled=df.columns, # 目前仅作为展示，锁定编辑功能
-        )
+        st.info("无数据")
+        return
+    
+    # Build HTML with rowspan for first column
+    html = ['<table class="task-table">']
+    
+    # Header
+    html.append('<thead><tr>')
+    for col in df.columns:
+        html.append(f'<th>{col}</th>')
+    html.append('</tr></thead>')
+    
+    # Body with rowspan
+    html.append('<tbody>')
+    
+    # Calculate rowspan for first column
+    first_col = df.iloc[:, 0].tolist()
+    i = 0
+    while i < len(df):
+        curr_val = first_col[i]
+        span = 1
+        while i + span < len(df) and first_col[i + span] == curr_val:
+            span += 1
         
-        # 底部操作区
-        col1, col2 = st.columns([1, 8])
-        with col1:
-            if st.button("🔄 刷新"):
-                st.cache_data.clear()
-                st.rerun()
-        with col2:
-            st.caption(f"最后同步时间: {pd.Timestamp.now().strftime('%H:%M:%S')} | 版本: {VERSION}")
+        # First row of the group
+        html.append('<tr>')
+        html.append(f'<td rowspan="{span}" class="merged-cell">{curr_val}</td>')
+        for j in range(1, len(df.columns)):
+            html.append(f'<td>{df.iloc[i, j]}</td>')
+        html.append('</tr>')
+        
+        # Remaining rows in the group (skip first column)
+        for k in range(1, span):
+            html.append('<tr>')
+            for j in range(1, len(df.columns)):
+                html.append(f'<td>{df.iloc[i + k, j]}</td>')
+            html.append('</tr>')
+        
+        i += span
+    
+    html.append('</tbody></table>')
+    
+    st.markdown(
+        """
+        <style>
+        .task-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+        .task-table th {
+            background-color: #f0f2f6;
+            padding: 10px 12px;
+            text-align: left;
+            font-weight: bold;
+            font-size: 15px;
+            border: 1px solid #ddd;
+        }
+        .task-table td {
+            padding: 10px 12px;
+            border: 1px solid #eee;
+            vertical-align: middle;
+            text-align: left;
+        }
+        .task-table .merged-cell {
+            background-color: #fafafa;
+            font-weight: 500;
+            vertical-align: middle;
+            text-align: left;
+        }
+        .task-table tr:hover td {
+            background-color: #f5f5f5;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+    st.markdown(''.join(html), unsafe_allow_html=True)
 
-with st.sidebar:
-    st.markdown("### 📊 统计概览")
-    if df is not None and not df.empty and "状态" in df.columns:
-        done_count = len(df[df["状态"] == "已完成"])
-        total_count = len(df)
-        st.metric("任务完成率", f"{int(done_count/total_count*100) if total_count > 0 else 0}%")
-        st.progress(done_count/total_count if total_count > 0 else 0.0)
-    st.markdown("---")
-    st.info("数据源: Google Sheet (Test plan)")
+
+try:
+    gc = _get_gspread_client()
+    sh = gc.open_by_key(SPREADSHEET_ID)
+    
+    ws1 = sh.worksheet(SHEET1_TITLE)
+    values1 = ws1.get_all_values()
+    if values1:
+        df1 = pd.DataFrame(values1[1:], columns=values1[0])
+        df1.iloc[:, 0] = df1.iloc[:, 0].replace("", pd.NA).ffill().fillna("")
+        render_table_with_rowspan(df1, "📋 进行中")
+    else:
+        st.subheader("📋 进行中")
+        st.info("无数据")
+    
+    st.divider()
+    
+    ws_archive = sh.worksheet(ARCHIVE_TITLE)
+    values_archive = ws_archive.get_all_values()
+    if values_archive:
+        df_archive = pd.DataFrame(values_archive[1:], columns=values_archive[0])
+        df_archive.iloc[:, 0] = df_archive.iloc[:, 0].replace("", pd.NA).ffill().fillna("")
+        render_table_with_rowspan(df_archive, "✅ 已完成")
+    else:
+        st.subheader("✅ 已完成")
+        st.info("无数据")
+
+except Exception as e:
+    st.error(f"连接失败：{e}")
