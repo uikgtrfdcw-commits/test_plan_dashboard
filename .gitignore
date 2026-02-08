@@ -1,0 +1,10 @@
+# 敏感凭证
+service_account.json
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+
+# 临时文件
+check_*.py
